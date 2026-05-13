@@ -1,0 +1,7 @@
+quizmaker_sfml
+QuizMaker.app/
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+data/reports/*.txt

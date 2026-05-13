@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.24)
+project(QuizMaker LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+add_executable(QuizMaker main.cpp)
+find_package(SFML 3 COMPONENTS Graphics Window System REQUIRED)
+target_link_libraries(QuizMaker PRIVATE SFML::Graphics SFML::Window SFML::System)
+if (WIN32)
+    target_compile_definitions(QuizMaker PRIVATE _CRT_SECURE_NO_WARNINGS)
+    add_custom_command(TARGET QuizMaker POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:QuizMaker> $<TARGET_RUNTIME_DLLS:QuizMaker>
+        COMMAND_EXPAND_LISTS)
+endif()
+if (APPLE)
+    set_target_properties(QuizMaker PROPERTIES MACOSX_BUNDLE TRUE MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist")
+endif()

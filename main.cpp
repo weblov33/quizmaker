@@ -52,6 +52,8 @@ struct Question {
     int quizId;
     string text;
     string type;
+    string imagePath;
+    int timeLimit;
 };
 
 struct Answer {
@@ -82,6 +84,9 @@ const size_t MIN_LOGIN_LEN = 3;
 const size_t MIN_PASSWORD_LEN = 4;
 const int MIN_SCORE = -100000;
 const int MAX_SCORE = 100000;
+const int MIN_ANSWER_COUNT = 1;
+const int MAX_ANSWER_COUNT = 10;
+const int MAX_TIME_LIMIT = 3600;
 
 string toUtf8(const u32string& text) {
     string result;
@@ -147,6 +152,26 @@ string cleanForFile(string text) {
     }
 
     return limitText(text);
+}
+
+string htmlEscape(const string& text) {
+    string result;
+
+    for (char c : text) {
+        if (c == '&') {
+            result += "&amp;";
+        } else if (c == '<') {
+            result += "&lt;";
+        } else if (c == '>') {
+            result += "&gt;";
+        } else if (c == '"') {
+            result += "&quot;";
+        } else {
+            result.push_back(c);
+        }
+    }
+
+    return result;
 }
 
 int countDigits(const string& text) {
@@ -294,8 +319,18 @@ vector<Question> loadQuestions() {
         int id = 0;
         int quizId = 0;
 
-        if (p.size() == 4 && parseInt(p[0], id, 1) && parseInt(p[1], quizId, 1)) {
-            items.push_back({id, quizId, p[2], p[3]});
+        if ((p.size() == 4 || p.size() == 6) &&
+            parseInt(p[0], id, 1) &&
+            parseInt(p[1], quizId, 1)) {
+            int timeLimit = 0;
+            string imagePath;
+
+            if (p.size() == 6) {
+                imagePath = p[4];
+                parseInt(p[5], timeLimit, 0, MAX_TIME_LIMIT);
+            }
+
+            items.push_back({id, quizId, p[2], p[3], imagePath, timeLimit});
         }
     }
 
@@ -373,7 +408,7 @@ bool saveQuestions(const vector<Question>& items) {
 
     for (auto& x : items) {
         ss << x.id << '|' << x.quizId << '|' << x.text << '|'
-           << x.type << "\n";
+           << x.type << '|' << x.imagePath << '|' << x.timeLimit << "\n";
     }
 
     return saveTextFile(QUESTIONS_FILE, ss.str());
@@ -430,7 +465,7 @@ sf::FloatRect makeRect(float x, float y, float w, float h) {
     return sf::FloatRect({x, y}, {w, h});
 }
 
-enum class Screen { Login, Home, Quizzes, Builder, Preview, Leads, Reports, Help };
+enum class Screen { Login, Home, Quizzes, Builder, QuizStart, Preview, Leads, Reports, Help };
 
 class MarquizApp {
 private:
@@ -449,7 +484,10 @@ private:
     Screen screen = Screen::Login;
     int currentUserId = -1;
     int selectedQuizId = -1;
+    int editingQuestionId = -1;
     string message = "Введите логин и пароль.";
+    string lastMessage;
+    chrono::steady_clock::time_point messageChangedAt = chrono::steady_clock::now();
     size_t previewIndex = 0;
     int previewScore = 0;
     bool contactStep = false;
@@ -461,35 +499,43 @@ private:
     InputField themeField{makeRect(810, 175, 210, 42), "тема"};
     InputField bonusField{makeRect(300, 235, 350, 42), "бонус/оффер после прохождения"};
     InputField questionField{makeRect(300, 175, 420, 42), "текст вопроса"};
-    InputField ans1Field{makeRect(300, 235, 260, 42), "вариант 1"};
-    InputField score1Field{makeRect(575, 235, 80, 42), "баллы"};
-    InputField ans2Field{makeRect(300, 295, 260, 42), "вариант 2"};
-    InputField score2Field{makeRect(575, 295, 80, 42), "баллы"};
+    InputField imagePathField{makeRect(300, 235, 260, 42), "путь к картинке (необязательно)"};
+    InputField timeLimitField{makeRect(575, 235, 80, 42), "сек"};
+    vector<InputField> answerFields;
+    vector<InputField> scoreFields;
     InputField leadNameField{makeRect(300, 420, 260, 42), "имя клиента"};
     InputField leadPhoneField{makeRect(580, 420, 260, 42), "телефон"};
     InputField searchField{makeRect(300, 170, 360, 42), "поиск по заявкам"};
+    InputField previewTextField{makeRect(300, 420, 360, 44), "ваш ответ"};
+    string questionType = "варианты";
+    int answerCount = 2;
 
-    // Темная тема приложения.
-    const sf::Color bg{10, 14, 24};
-    const sf::Color sidebar{17, 24, 39};
-    const sf::Color card{22, 30, 46};
-    const sf::Color cardSoft{28, 39, 59};
-    const sf::Color field{13, 19, 32};
-    const sf::Color accent{38, 203, 180};
-    const sf::Color violet{124, 92, 255};
-    const sf::Color violetSoft{36, 31, 72};
-    const sf::Color danger{239, 93, 124};
-    const sf::Color text{238, 244, 255};
-    const sf::Color muted{148, 163, 184};
-    const sf::Color line{55, 70, 96};
+    // Цвета интерфейса.
+    const sf::Color bg{10, 12, 13};
+    const sf::Color sidebar{18, 22, 23};
+    const sf::Color card{22, 27, 28};
+    const sf::Color cardSoft{29, 36, 37};
+    const sf::Color field{14, 17, 18};
+    const sf::Color fieldActive{23, 29, 30};
+    const sf::Color accent{123, 151, 132};
+    const sf::Color violet{74, 105, 96};
+    const sf::Color violetSoft{29, 45, 42};
+    const sf::Color danger{164, 82, 75};
+    const sf::Color text{230, 232, 225};
+    const sf::Color muted{143, 151, 145};
+    const sf::Color line{54, 63, 61};
 public:
     MarquizApp()
         : window(sf::VideoMode({1100, 720}),
-                 sfText("QuizMaker - конструктор квизов"),
+                 sfText("Квиз"),
                  sf::Style::Default,
                  sf::State::Windowed,
                  makeSettings()) {
         window.setFramerateLimit(60);
+        for (int i = 0; i < MAX_ANSWER_COUNT; i++) {
+            answerFields.push_back({makeRect(0, 0, 260, 42), "ответ " + to_string(i + 1)});
+            scoreFields.push_back({makeRect(0, 0, 80, 42), "баллы"});
+        }
         setupWorkingDirectory();
 
         if (!ensureDataFiles()) {
@@ -828,8 +874,8 @@ private:
             screen = Screen::Quizzes;
         } else if (id == "builder") {
             screen = Screen::Builder;
-        } else if (id == "preview") {
-            startPreview();
+        } else if (id == "quizStart") {
+            screen = Screen::QuizStart;
         } else if (id == "leads") {
             screen = Screen::Leads;
         } else if (id == "reports") {
@@ -840,10 +886,33 @@ private:
             addQuiz();
         } else if (id == "addQuestion") {
             addQuestion();
+        } else if (id == "cancelQuestionEdit") {
+            clearQuestionForm();
+            message = "Редактирование отменено.";
+        } else if (id == "answerMinus") {
+            answerCount = max(MIN_ANSWER_COUNT, answerCount - 1);
+            message = "Количество ответов: " + to_string(answerCount);
+        } else if (id == "answerPlus") {
+            answerCount = min(MAX_ANSWER_COUNT, answerCount + 1);
+            message = "Количество ответов: " + to_string(answerCount);
+        } else if (id == "typeVariants") {
+            questionType = "варианты";
+            answerCount = max(2, answerCount);
+            message = "Формат вопроса: варианты ответа.";
+        } else if (id == "typeText") {
+            questionType = "текст";
+            answerCount = 1;
+            message = "Формат вопроса: текстовый ответ.";
+        } else if (id == "typeMatch") {
+            questionType = "соответствие";
+            answerCount = max(2, answerCount);
+            message = "Формат вопроса: соответствие.";
         } else if (id == "demo") {
             addDemo();
         } else if (id == "saveLead") {
             saveLead();
+        } else if (id == "submitTextAnswer") {
+            submitTextAnswer();
         } else if (id == "report") {
             makeReport();
         } else if (readButtonId(id, "selectQuiz_", objectId)) {
@@ -855,6 +924,24 @@ private:
             selectedQuizId = objectId;
             screen = Screen::Builder;
             message = "Выбран квиз: " + quizTitle(selectedQuizId);
+        } else if (readButtonId(id, "deleteQuiz_", objectId)) {
+            deleteQuiz(objectId);
+        } else if (readButtonId(id, "startQuiz_", objectId)) {
+            if (!quizExists(objectId)) {
+                message = "Квиз не найден.";
+                return;
+            }
+
+            selectedQuizId = objectId;
+            startPreview();
+        } else if (readButtonId(id, "editQuestion_", objectId)) {
+            loadQuestionToForm(objectId);
+        } else if (readButtonId(id, "deleteQuestion_", objectId)) {
+            deleteQuestion(objectId);
+        } else if (readButtonId(id, "leadCert_", objectId)) {
+            makeCertificate(objectId);
+        } else if (readButtonId(id, "deleteLead_", objectId)) {
+            deleteLead(objectId);
         } else if (readButtonId(id, "answer_", objectId)) {
             chooseAnswer(objectId);
         }
@@ -874,7 +961,7 @@ private:
                 currentUserId = u.id;
                 selectFirstQuizForCurrentUser();
                 screen = Screen::Home;
-                message = "Вход выполнен.";
+                message.clear();
                 return;
             }
         }
@@ -924,14 +1011,14 @@ private:
 
         currentUserId = id;
         screen = Screen::Home;
-        message = "Регистрация выполнена.";
+        message.clear();
     }
 
     void logout() {
         currentUserId = -1;
         selectedQuizId = -1;
         screen = Screen::Login;
-        message = "Вы вышли из аккаунта.";
+        message = "Введите логин и пароль.";
         loginField.text.clear();
         passField.text.clear();
     }
@@ -975,6 +1062,61 @@ private:
         message = "Квиз создан.";
     }
 
+    void deleteQuiz(int quizId) {
+        if (!quizExists(quizId)) {
+            message = "Квиз не найден.";
+            return;
+        }
+
+        auto oldQuizzes = quizzes;
+        auto oldQuestions = questions;
+        auto oldAnswers = answers;
+        auto oldLeads = leads;
+
+        vector<int> questionIds;
+        for (auto& q : questions) {
+            if (q.quizId == quizId) {
+                questionIds.push_back(q.id);
+            }
+        }
+
+        quizzes.erase(remove_if(quizzes.begin(), quizzes.end(), [&](const Quiz& q) {
+            return q.id == quizId && q.userId == currentUserId;
+        }), quizzes.end());
+
+        questions.erase(remove_if(questions.begin(), questions.end(), [&](const Question& q) {
+            return q.quizId == quizId;
+        }), questions.end());
+
+        answers.erase(remove_if(answers.begin(), answers.end(), [&](const Answer& a) {
+            return find(questionIds.begin(), questionIds.end(), a.questionId) != questionIds.end();
+        }), answers.end());
+
+        leads.erase(remove_if(leads.begin(), leads.end(), [&](const Lead& l) {
+            return l.quizId == quizId;
+        }), leads.end());
+
+        if (!saveQuizzes(quizzes) || !saveQuestions(questions) || !saveAnswers(answers) || !saveLeads(leads)) {
+            quizzes = oldQuizzes;
+            questions = oldQuestions;
+            answers = oldAnswers;
+            leads = oldLeads;
+            saveQuizzes(quizzes);
+            saveQuestions(questions);
+            saveAnswers(answers);
+            saveLeads(leads);
+            message = "Ошибка удаления квиза.";
+            return;
+        }
+
+        if (selectedQuizId == quizId) {
+            selectFirstQuizForCurrentUser();
+        }
+
+        screen = Screen::Quizzes;
+        message = "Квиз удален.";
+    }
+
     void addQuestion() {
         if (!quizExists(selectedQuizId)) {
             message = "Сначала выберите квиз.";
@@ -982,41 +1124,91 @@ private:
         }
 
         string question = cleanForFile(toUtf8(questionField.text));
-        string answer1 = cleanForFile(toUtf8(ans1Field.text));
-        string answer2 = cleanForFile(toUtf8(ans2Field.text));
+        string imagePath = cleanForFile(toUtf8(imagePathField.text));
+        string timeLimitText = toUtf8(timeLimitField.text);
+        int timeLimit = 0;
 
-        if (question.empty() || answer1.empty() || answer2.empty()) {
-            message = "Заполните вопрос и два варианта ответа.";
+        if (!trim(timeLimitText).empty() && !parseInt(timeLimitText, timeLimit, 0, MAX_TIME_LIMIT)) {
+            message = "Время должно быть числом от 0 до 3600.";
             return;
         }
 
-        if (lowerText(answer1) == lowerText(answer2)) {
-            message = "Варианты ответа должны отличаться.";
+        if (question.empty()) {
+            message = "Заполните текст вопроса.";
             return;
         }
 
-        int score1 = 0;
-        int score2 = 0;
-        string score1Text = toUtf8(score1Field.text);
-        string score2Text = toUtf8(score2Field.text);
+        vector<string> answerTexts;
+        vector<int> answerScores;
 
-        if (!trim(score1Text).empty() && !parseInt(score1Text, score1, MIN_SCORE, MAX_SCORE)) {
-            message = "Баллы варианта 1 должны быть числом.";
-            return;
+        for (int i = 0; i < answerCount; i++) {
+            string answer = cleanForFile(toUtf8(answerFields[i].text));
+            string scoreText = toUtf8(scoreFields[i].text);
+            int score = 0;
+
+            if (answer.empty()) {
+                message = "Заполните все ответы.";
+                return;
+            }
+
+            if (questionType == "соответствие" && answer.find("->") == string::npos) {
+                message = "Для соответствия используйте формат: слово -> пара.";
+                return;
+            }
+
+            if (!trim(scoreText).empty() && !parseInt(scoreText, score, MIN_SCORE, MAX_SCORE)) {
+                message = "Баллы ответа " + to_string(i + 1) + " должны быть числом.";
+                return;
+            }
+
+            for (auto& existing : answerTexts) {
+                if (lowerText(existing) == lowerText(answer)) {
+                    message = "Ответы не должны повторяться.";
+                    return;
+                }
+            }
+
+            answerTexts.push_back(answer);
+            answerScores.push_back(score);
         }
 
-        if (!trim(score2Text).empty() && !parseInt(score2Text, score2, MIN_SCORE, MAX_SCORE)) {
-            message = "Баллы варианта 2 должны быть числом.";
+        if (questionType == "варианты" && answerTexts.size() < 2) {
+            message = "Для теста нужно минимум два варианта.";
             return;
         }
 
         auto oldQuestions = questions;
         auto oldAnswers = answers;
-        int questionId = nextId(questions);
+        int questionId = editingQuestionId == -1 ? nextId(questions) : editingQuestionId;
 
-        questions.push_back({questionId, selectedQuizId, question, "варианты"});
-        answers.push_back({nextId(answers), questionId, answer1, score1});
-        answers.push_back({nextId(answers), questionId, answer2, score2});
+        if (editingQuestionId == -1) {
+            questions.push_back({questionId, selectedQuizId, question, questionType, imagePath, timeLimit});
+        } else {
+            bool found = false;
+            for (auto& q : questions) {
+                if (q.id == editingQuestionId && q.quizId == selectedQuizId) {
+                    q.text = question;
+                    q.type = questionType;
+                    q.imagePath = imagePath;
+                    q.timeLimit = timeLimit;
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                message = "Вопрос для изменения не найден.";
+                return;
+            }
+
+            answers.erase(remove_if(answers.begin(), answers.end(), [&](const Answer& a) {
+                return a.questionId == editingQuestionId;
+            }), answers.end());
+        }
+
+        for (size_t i = 0; i < answerTexts.size(); i++) {
+            answers.push_back({nextId(answers), questionId, answerTexts[i], answerScores[i]});
+        }
 
         // Сохраняем связанные файлы вместе. При ошибке возвращаем старое состояние.
         if (!saveQuestions(questions) || !saveAnswers(answers)) {
@@ -1028,12 +1220,94 @@ private:
             return;
         }
 
+        bool wasEditing = editingQuestionId != -1;
+        clearQuestionForm();
+        message = wasEditing ? "Вопрос изменен." : "Вопрос добавлен.";
+    }
+
+    void clearQuestionForm() {
+        editingQuestionId = -1;
         questionField.text.clear();
-        ans1Field.text.clear();
-        ans2Field.text.clear();
-        score1Field.text.clear();
-        score2Field.text.clear();
-        message = "Вопрос добавлен.";
+        imagePathField.text.clear();
+        timeLimitField.text.clear();
+        questionType = "варианты";
+        answerCount = 2;
+
+        for (int i = 0; i < MAX_ANSWER_COUNT; i++) {
+            answerFields[i].text.clear();
+            scoreFields[i].text.clear();
+        }
+    }
+
+    void loadQuestionToForm(int questionId) {
+        for (auto& q : questions) {
+            if (q.id == questionId && q.quizId == selectedQuizId) {
+                editingQuestionId = q.id;
+                questionField.text = sfText(q.text).toUtf32();
+                imagePathField.text = sfText(q.imagePath).toUtf32();
+                timeLimitField.text = sfText(q.timeLimit > 0 ? to_string(q.timeLimit) : "").toUtf32();
+                questionType = q.type;
+
+                auto list = questionAnswers(q.id);
+                answerCount = max(MIN_ANSWER_COUNT, min(MAX_ANSWER_COUNT, (int)list.size()));
+
+                for (int i = 0; i < MAX_ANSWER_COUNT; i++) {
+                    answerFields[i].text.clear();
+                    scoreFields[i].text.clear();
+                }
+
+                for (int i = 0; i < answerCount; i++) {
+                    answerFields[i].text = sfText(list[i].text).toUtf32();
+                    scoreFields[i].text = sfText(to_string(list[i].score)).toUtf32();
+                }
+
+                message = "Вопрос открыт для изменения.";
+                return;
+            }
+        }
+
+        message = "Вопрос не найден.";
+    }
+
+    void deleteQuestion(int questionId) {
+        bool belongsToSelectedQuiz = false;
+        for (auto& q : questions) {
+            if (q.id == questionId && q.quizId == selectedQuizId) {
+                belongsToSelectedQuiz = true;
+                break;
+            }
+        }
+
+        if (!belongsToSelectedQuiz) {
+            message = "Вопрос не найден.";
+            return;
+        }
+
+        auto oldQuestions = questions;
+        auto oldAnswers = answers;
+
+        questions.erase(remove_if(questions.begin(), questions.end(), [&](const Question& q) {
+            return q.id == questionId;
+        }), questions.end());
+
+        answers.erase(remove_if(answers.begin(), answers.end(), [&](const Answer& a) {
+            return a.questionId == questionId;
+        }), answers.end());
+
+        if (!saveQuestions(questions) || !saveAnswers(answers)) {
+            questions = oldQuestions;
+            answers = oldAnswers;
+            saveQuestions(questions);
+            saveAnswers(answers);
+            message = "Ошибка удаления вопроса.";
+            return;
+        }
+
+        if (editingQuestionId == questionId) {
+            clearQuestionForm();
+        }
+
+        message = "Вопрос удален.";
     }
 
     void addDemo() {
@@ -1055,11 +1329,11 @@ private:
             0
         });
 
-        questions.push_back({question1Id, quizId, "Какой формат обучения вам удобнее?", "варианты"});
+        questions.push_back({question1Id, quizId, "Какой формат обучения вам удобнее?", "варианты", "", 0});
         answers.push_back({nextId(answers), question1Id, "Онлайн", 5});
         answers.push_back({nextId(answers), question1Id, "Очно", 3});
 
-        questions.push_back({question2Id, quizId, "Какой уровень подготовки?", "варианты"});
+        questions.push_back({question2Id, quizId, "Какой уровень подготовки?", "варианты", "", 0});
         answers.push_back({nextId(answers), question2Id, "Начинающий", 2});
         answers.push_back({nextId(answers), question2Id, "Уже писал код", 6});
 
@@ -1156,6 +1430,42 @@ private:
         }
     }
 
+    void submitTextAnswer() {
+        if (!quizExists(selectedQuizId) || contactStep) {
+            return;
+        }
+
+        auto quizQuestionList = quizQuestions(selectedQuizId);
+        if (previewIndex >= quizQuestionList.size()) {
+            contactStep = true;
+            return;
+        }
+
+        auto currentQuestion = quizQuestionList[previewIndex];
+        auto currentAnswers = questionAnswers(currentQuestion.id);
+        string value = lowerText(cleanForFile(toUtf8(previewTextField.text)));
+
+        if (value.empty()) {
+            message = "Введите ответ.";
+            return;
+        }
+
+        for (auto& answer : currentAnswers) {
+            if (lowerText(answer.text) == value) {
+                previewScore += answer.score;
+                break;
+            }
+        }
+
+        previewTextField.text.clear();
+        previewIndex++;
+
+        if (previewIndex >= quizQuestionList.size()) {
+            contactStep = true;
+            message = "Квиз пройден. Оставьте контакт.";
+        }
+    }
+
     void saveLead() {
         if (!quizExists(selectedQuizId) || !contactStep) {
             message = "Сначала пройдите квиз.";
@@ -1187,6 +1497,84 @@ private:
         message = "Заявка сохранена.";
     }
 
+    void deleteLead(int leadId) {
+        bool found = false;
+        for (auto& l : leads) {
+            if (l.id == leadId && quizExists(l.quizId)) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            message = "Заявка не найдена.";
+            return;
+        }
+
+        auto oldLeads = leads;
+        leads.erase(remove_if(leads.begin(), leads.end(), [&](const Lead& l) {
+            return l.id == leadId;
+        }), leads.end());
+
+        if (!saveLeads(leads)) {
+            leads = oldLeads;
+            saveLeads(leads);
+            message = "Ошибка удаления заявки.";
+            return;
+        }
+
+        message = "Заявка удалена.";
+    }
+
+    void makeCertificate(int leadId) {
+        const Lead* lead = nullptr;
+        for (auto& l : leads) {
+            if (l.id == leadId && quizExists(l.quizId)) {
+                lead = &l;
+                break;
+            }
+        }
+
+        if (!lead) {
+            message = "Заявка не найдена.";
+            return;
+        }
+
+        error_code ec;
+        filesystem::create_directories(REPORTS_DIR, ec);
+        if (ec) {
+            message = "Ошибка создания папки reports.";
+            return;
+        }
+
+        string fileName = REPORTS_DIR + "/certificate_" + to_string(lead->id) + ".html";
+        ofstream file(fileName, ios::trunc);
+        if (!file) {
+            message = "Не удалось создать сертификат.";
+            return;
+        }
+
+        file << "<!doctype html><html><head><meta charset='utf-8'><title>Сертификат</title>";
+        file << "<style>body{font-family:Arial,sans-serif;background:#f4f7fb;margin:0;padding:46px;color:#18212f}";
+        file << ".cert{max-width:860px;margin:auto;background:white;border:2px solid #2c5bd6;padding:54px;text-align:center}";
+        file << "h1{font-size:44px;margin:0 0 28px}.name{font-size:34px;color:#008f7d;margin:24px 0}";
+        file << ".score{font-size:24px;margin:26px 0}.meta{color:#5e6f84;margin-top:40px}</style></head><body>";
+        file << "<div class='cert'><h1>Сертификат</h1>";
+        file << "<p>Подтверждает прохождение квиза</p>";
+        file << "<div class='name'>" << htmlEscape(lead->name) << "</div>";
+        file << "<p>Квиз: <b>" << htmlEscape(quizTitle(lead->quizId)) << "</b></p>";
+        file << "<div class='score'>Результат: " << lead->score << " баллов</div>";
+        file << "<p class='meta'>Телефон: " << htmlEscape(lead->phone) << " | Дата: " << htmlEscape(lead->date) << "</p>";
+        file << "</div></body></html>";
+
+        if (!file) {
+            message = "Ошибка записи сертификата.";
+            return;
+        }
+
+        message = "Сертификат создан: " + fileName;
+    }
+
     void makeReport() {
         if (!quizExists(selectedQuizId)) {
             message = "Выберите квиз для отчета.";
@@ -1201,7 +1589,7 @@ private:
             return;
         }
 
-        string fileName = REPORTS_DIR + "/quiz_report_" + to_string(selectedQuizId) + ".txt";
+        string fileName = REPORTS_DIR + "/quiz_report_" + to_string(selectedQuizId) + ".html";
         ofstream report(fileName, ios::trunc);
 
         if (!report) {
@@ -1225,23 +1613,32 @@ private:
             }
         }
 
-        report << "ОТЧЕТ ПО КВИЗУ\n";
-        report << "Название: " << quizTitle(selectedQuizId) << "\n";
-        report << "Категория: " << category << "\n";
-        report << "Тема: " << theme << "\n";
-        report << "Бонус: " << bonus << "\n";
-        report << "Открытий: " << opens << "\n";
-        report << "Вопросов: " << questionCount << "\n";
-        report << "Заявок: " << leadCount << "\n";
-        report << "Конверсия: " << (opens ? leadCount * 100 / opens : 0) << "%\n\n";
-        report << "ЗАЯВКИ\n";
+        report << "<!doctype html><html><head><meta charset='utf-8'><title>Отчет по квизу</title>";
+        report << "<style>body{font-family:Arial,sans-serif;background:#f4f7fb;color:#18212f;margin:0;padding:36px}";
+        report << "main{max-width:980px;margin:auto;background:#fff;padding:34px;border:1px solid #cbd5e1}";
+        report << "h1{margin-top:0}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:24px 0}";
+        report << ".card{background:#e8f1f9;padding:16px;border-radius:8px}.label{color:#5e6f84;font-size:13px}";
+        report << "table{width:100%;border-collapse:collapse;margin-top:24px}th,td{border-bottom:1px solid #cbd5e1;padding:12px;text-align:left}";
+        report << "th{background:#e8f1f9}</style></head><body><main>";
+        report << "<h1>Отчет по квизу</h1>";
+        report << "<p><b>" << htmlEscape(quizTitle(selectedQuizId)) << "</b></p>";
+        report << "<p>Категория: " << htmlEscape(category) << " | Тема: " << htmlEscape(theme) << "</p>";
+        report << "<p>Бонус: " << htmlEscape(bonus) << "</p>";
+        report << "<div class='grid'>";
+        report << "<div class='card'><div class='label'>Открытий</div><b>" << opens << "</b></div>";
+        report << "<div class='card'><div class='label'>Вопросов</div><b>" << questionCount << "</b></div>";
+        report << "<div class='card'><div class='label'>Заявок</div><b>" << leadCount << "</b></div>";
+        report << "<div class='card'><div class='label'>Конверсия</div><b>" << (opens ? leadCount * 100 / opens : 0) << "%</b></div>";
+        report << "</div><h2>Заявки</h2><table><tr><th>Дата</th><th>Имя</th><th>Телефон</th><th>Баллы</th></tr>";
 
         for (auto& l : leads) {
             if (l.quizId == selectedQuizId) {
-                report << l.date << " | " << l.name << " | " << l.phone
-                       << " | баллы: " << l.score << "\n";
+                report << "<tr><td>" << htmlEscape(l.date) << "</td><td>" << htmlEscape(l.name) << "</td><td>"
+                       << htmlEscape(l.phone) << "</td><td>" << l.score << "</td></tr>";
             }
         }
+
+        report << "</table></main></body></html>";
 
         if (!report) {
             message = "Ошибка записи отчета.";
@@ -1264,6 +1661,8 @@ private:
             drawQuizzes();
         } else if (screen == Screen::Builder) {
             drawBuilder();
+        } else if (screen == Screen::QuizStart) {
+            drawQuizStart();
         } else if (screen == Screen::Preview) {
             drawPreview();
         } else if (screen == Screen::Leads) {
@@ -1279,28 +1678,28 @@ private:
 
     void drawBackground() {
         drawRect(makeRect(0, 0, appW(), appH()), bg);
-        drawRect(makeRect(0, 0, appW(), 108), sf::Color(12, 18, 31));
-        drawRect(makeRect(0, 108, appW(), 1), sf::Color(31, 42, 62));
+        drawRect(makeRect(0, 0, appW(), 92), sf::Color(13, 16, 17));
+        drawRect(makeRect(0, 92, appW(), 1), line);
+        drawRect(makeRect(0, 93, appW(), 3), sf::Color(20, 26, 26));
     }
 
     void drawMenu() {
-        drawSurface(makeRect(28, 22, appW() - 56, 62), 22, sidebar, sf::Color(38, 52, 78), true);
-        drawRoundedRect(makeRect(54, 41, 10, 26), 5, accent);
-        drawText("QuizMaker", 76, 36, 24, text);
-        drawText("квизы и заявки", 218, 43, 13, muted);
+        drawRect(makeRect(0, 0, appW(), 92), sidebar);
+        drawRoundedRect(makeRect(34, 30, 6, 32), 2, accent);
+        drawText("Квиз", 56, 28, 25, text);
 
-        float buttonY = 34;
-        float gap = 10;
-        float bx = max(360.f, appW() - 760.f);
+        float buttonY = 28;
+        float gap = 8;
+        float bx = max(250.f, appW() - 610.f);
 
-        addNavButton("home", "Главная", bx, buttonY, 86, 38, screen == Screen::Home);
-        addNavButton("quizzes", "Квизы", bx + 86 + gap, buttonY, 74, 38, screen == Screen::Quizzes);
-        addNavButton("builder", "Вопросы", bx + 170 + gap, buttonY, 90, 38, screen == Screen::Builder);
-        addNavButton("preview", "Проход", bx + 270 + gap, buttonY, 84, 38, screen == Screen::Preview);
-        addNavButton("leads", "Заявки", bx + 364 + gap, buttonY, 80, 38, screen == Screen::Leads);
-        addNavButton("reports", "Отчеты", bx + 454 + gap, buttonY, 82, 38, screen == Screen::Reports);
-        addButton("logout", "Выход", appW() - 116, buttonY, 74, 38, danger);
+        addNavButton("home", "Главная", bx, buttonY, 86, 36, screen == Screen::Home);
+        addNavButton("quizzes", "Квизы", bx + 86 + gap, buttonY, 74, 36, screen == Screen::Quizzes);
+        addNavButton("builder", "Вопросы", bx + 168 + gap, buttonY, 90, 36, screen == Screen::Builder);
+        addNavButton("leads", "Заявки", bx + 266 + gap, buttonY, 80, 36, screen == Screen::Leads);
+        addNavButton("reports", "Отчеты", bx + 354 + gap, buttonY, 82, 36, screen == Screen::Reports);
+        addButton("logout", "Выход", appW() - 108, buttonY, 74, 36, danger);
     }
+
     void drawLogin() {
         float cardW = min(520.f, appW() - 80.f);
         float cardH = 398.f;
@@ -1309,10 +1708,10 @@ private:
         float x = cardX + 50.f;
         float fieldW = cardW - 100.f;
 
-        drawSurface(makeRect(cardX, cardY, cardW, cardH), 28, card, sf::Color(40, 55, 82), true);
-        drawRoundedRect(makeRect(x, cardY + 42, 72, 8), 4, accent);
+        drawSurface(makeRect(cardX, cardY, cardW, cardH), 8, card, line, true);
+        drawRoundedRect(makeRect(x, cardY + 42, 72, 4), 1, accent);
         drawText("Вход", x, cardY + 76, 34, text);
-        drawText("QuizMaker", x, cardY + 122, 16, muted);
+        drawText("Квиз", x, cardY + 122, 16, muted);
 
         loginField.rect = makeRect(x, cardY + 172, fieldW, 46);
         passField.rect = makeRect(x, cardY + 234, fieldW, 46);
@@ -1340,19 +1739,20 @@ private:
         }
 
         drawText("Панель управления", x, 126, 33, text);
-        drawText("Создавайте квизы, вопросы, заявки и отчеты.", x, 168, 16, muted);
+        drawText("Квизы, вопросы, заявки, отчеты.", x, 168, 16, muted);
         drawText("Выбрано: " + selectedQuizStatus(), x, 196, 15, muted);
 
-        drawSurface(makeRect(x, 238, w, 138), 26, card, sf::Color(39, 54, 80), true);
-        drawRoundedRect(makeRect(x + 28, 266, 54, 54), 18, accent);
+        drawSurface(makeRect(x, 238, w, 138), 8, card, line, true);
+        drawRoundedRect(makeRect(x + 28, 266, 54, 54), 6, accent);
         drawText(to_string(quizCount), x + 46, 278, 25, bg);
         drawText("Квизы", x + 104, 264, 23, text);
-        drawText("Создайте квиз, затем добавьте к нему вопросы и варианты.", x + 104, 301, 16, muted);
+        drawText("Создание и настройка квизов.", x + 104, 301, 16, muted);
 
-        drawSurface(makeRect(x, 404, w, 118), 22, card, sf::Color(39, 54, 80), true);
+        drawSurface(makeRect(x, 404, w, 118), 8, card, line, true);
         drawText("Заявки: " + to_string(userLeadCount), x + 28, 432, 22, text);
-        drawText("В отчетах показываются открытия, заявки и конверсия выбранного квиза.", x + 28, 468, 16, muted);
+        drawText("Открытия, заявки и конверсия выбранного квиза.", x + 28, 468, 16, muted);
         addButton("demo", "Добавить демо-квиз", x, 562, 220, 44);
+        addButton("quizStart", "Пройти квиз", x + 240, 562, 160, 44, violet);
     }
 
     void drawQuizzes() {
@@ -1365,7 +1765,7 @@ private:
         bonusField.rect = makeRect(x, 250, 450, 44);
 
         drawText("Мои квизы", x, 126, 31, text);
-        drawText("Создайте квиз или выберите существующий.", x, 166, 16, muted);
+        drawText("Создание и выбор квиза.", x, 166, 16, muted);
 
         drawInput(titleField);
         drawInput(categoryField);
@@ -1378,7 +1778,7 @@ private:
 
         for (auto& q : list) {
             sf::Color quizColor = q.id == selectedQuizId ? violetSoft : card;
-            sf::Color quizBorder = q.id == selectedQuizId ? violet : sf::Color(39, 54, 80);
+            sf::Color quizBorder = q.id == selectedQuizId ? accent : line;
             int leadCount = leadCountForQuiz(q.id);
             int questionCount = questionCountForQuiz(q.id);
 
@@ -1393,7 +1793,8 @@ private:
                 14,
                 muted
             );
-            addButton("selectQuiz_" + to_string(q.id), "Открыть", x + w - 116, y + 16, 96, 34, violet);
+            addButton("selectQuiz_" + to_string(q.id), "Открыть", x + w - 210, y + 16, 90, 34, violet);
+            addButton("deleteQuiz_" + to_string(q.id), "Удалить", x + w - 108, y + 16, 88, 34, danger);
 
             y += 78;
             if (y > footerY() - 70) {
@@ -1418,25 +1819,15 @@ private:
         if (!quizExists(selectedQuizId)) {
             drawSurface(makeRect(x, 220, w, 96), 22, card, sf::Color::Transparent, true);
             drawText("Сначала выберите квиз.", x + 24, 246, 19, text);
-            drawText("Перейдите на экран 'Квизы' и нажмите 'Открыть' у нужного квиза.", x + 24, 278, 15, muted);
+            drawText("Откройте раздел 'Квизы' и выберите запись.", x + 24, 278, 15, muted);
             return;
         }
 
-        questionField.rect = makeRect(x, 190, 440, 44);
-        ans1Field.rect = makeRect(x, 254, 280, 44);
-        score1Field.rect = makeRect(x + 296, 254, 86, 44);
-        ans2Field.rect = makeRect(x, 316, 280, 44);
-        score2Field.rect = makeRect(x + 296, 316, 86, 44);
-
-        drawInput(questionField);
-        drawInput(ans1Field);
-        drawInput(score1Field);
-        drawInput(ans2Field);
-        drawInput(score2Field);
-        addButton("addQuestion", "Добавить вопрос", x + 462, 254, 178, 44);
-
-        float y = 400;
         auto quizQuestionList = quizQuestions(selectedQuizId);
+        float y = 206;
+
+        drawText("Вопросы квиза", x, y, 20, text);
+        y += 34;
 
         for (auto& q : quizQuestionList) {
             string answerLine;
@@ -1445,20 +1836,99 @@ private:
                 answerLine += a.text + " (" + to_string(a.score) + ")  ";
             }
 
-            drawSurface(makeRect(x, y, w, 66), 20, card, sf::Color::Transparent, true);
-            drawText(q.text, x + 22, y + 12, 18, text);
-            drawText(answerLine, x + 22, y + 40, 14, muted);
+            drawSurface(makeRect(x, y, w, 72), 18, q.id == editingQuestionId ? violetSoft : card, line, true);
+            string meta = q.type;
+            if (q.timeLimit > 0) {
+                meta += " | " + to_string(q.timeLimit) + " сек";
+            }
+            if (!q.imagePath.empty()) {
+                meta += " | картинка";
+            }
+            drawText(q.text + " / " + meta, x + 20, y + 11, 17, text);
+            drawText(answerLine, x + 20, y + 41, 13, muted);
+            addButton("editQuestion_" + to_string(q.id), "Изменить", x + w - 205, y + 19, 96, 34, violet);
+            addButton("deleteQuestion_" + to_string(q.id), "Удалить", x + w - 98, y + 19, 86, 34, danger);
 
-            y += 78;
-            if (y > footerY() - 70) {
+            y += 84;
+            if (y > 430) {
                 break;
             }
         }
 
         if (quizQuestionList.empty()) {
-            drawSurface(makeRect(x, 400, w, 78), 20, card, sf::Color::Transparent, true);
-            drawText("Вопросов пока нет.", x + 22, 422, 18, text);
-            drawText("Заполните форму выше и нажмите 'Добавить вопрос'.", x + 22, 452, 15, muted);
+            drawSurface(makeRect(x, y, w, 76), 18, card, line, true);
+            drawText("Вопросов пока нет.", x + 22, y + 18, 18, text);
+            drawText("Добавьте первый вопрос в форме ниже.", x + 22, y + 48, 15, muted);
+            y += 92;
+        }
+
+        float formTop = max(454.f, y + 16.f);
+        drawText(editingQuestionId == -1 ? "Новый вопрос" : "Изменение вопроса", x, formTop, 20, text);
+
+        questionField.rect = makeRect(x, formTop + 34, 440, 42);
+        imagePathField.rect = makeRect(x + 462, formTop + 34, 290, 42);
+        timeLimitField.rect = makeRect(x + 770, formTop + 34, 86, 42);
+
+        drawInput(questionField);
+        drawInput(imagePathField);
+        drawInput(timeLimitField);
+
+        float controlsY = formTop + 90;
+        addNavButton("typeVariants", "Тест", x, controlsY, 86, 36, questionType == "варианты");
+        addNavButton("typeText", "Текст", x + 96, controlsY, 88, 36, questionType == "текст");
+        addNavButton("typeMatch", "Связи", x + 194, controlsY, 90, 36, questionType == "соответствие");
+        addButton("answerMinus", "-", x + 310, controlsY, 38, 36, violet);
+        drawText("ответов: " + to_string(answerCount), x + 358, controlsY + 8, 15, muted);
+        addButton("answerPlus", "+", x + 456, controlsY, 38, 36, violet);
+        addButton("addQuestion", editingQuestionId == -1 ? "Добавить вопрос" : "Сохранить вопрос", x + 520, controlsY, 178, 36);
+        if (editingQuestionId != -1) {
+            addButton("cancelQuestionEdit", "Отмена", x + 710, controlsY, 104, 36, danger);
+        }
+
+        float formY = controlsY + 58;
+        int columns = answerCount > 5 ? 2 : 1;
+        int rowsPerColumn = columns == 2 ? 5 : answerCount;
+        float colW = columns == 2 ? 430.f : 500.f;
+
+        for (int i = 0; i < answerCount; i++) {
+            int col = i / rowsPerColumn;
+            int row = i % rowsPerColumn;
+            float ax = x + col * colW;
+            float ay = formY + row * 54;
+            string prefix = questionType == "соответствие" ? "пара " : (questionType == "текст" ? "правильный ответ " : "ответ ");
+
+            answerFields[i].hint = prefix + to_string(i + 1);
+            answerFields[i].rect = makeRect(ax, ay, 282, 42);
+            scoreFields[i].rect = makeRect(ax + 296, ay, 82, 42);
+            drawInput(answerFields[i]);
+            drawInput(scoreFields[i]);
+        }
+    }
+
+    void drawQuizStart() {
+        float x = contentX();
+        float w = min(900.f, contentW());
+        auto list = userQuizzes();
+
+        drawText("Выберите квиз", x, 126, 31, text);
+        drawText("Выберите нужный квиз.", x, 166, 16, muted);
+
+        float y = 220;
+        for (auto& q : list) {
+            drawSurface(makeRect(x, y, w, 92), 22, card, line, true);
+            drawText(q.title, x + 24, y + 18, 22, text);
+            drawText(q.category + " | " + q.theme + " | вопросов: " + to_string(questionCountForQuiz(q.id)), x + 24, y + 54, 15, muted);
+            addButton("startQuiz_" + to_string(q.id), "Пройти", x + w - 130, y + 24, 106, 44, violet);
+            y += 108;
+            if (y > footerY() - 100) {
+                break;
+            }
+        }
+
+        if (list.empty()) {
+            drawSurface(makeRect(x, 220, w, 86), 22, card, line, true);
+            drawText("Нет доступных квизов.", x + 24, 244, 18, text);
+            drawText("Добавьте квиз в разделе 'Квизы'.", x + 24, 274, 15, muted);
         }
     }
 
@@ -1478,7 +1948,7 @@ private:
         if (contactStep) {
             drawSurface(makeRect(x, 220, w, 180), 26, card, sf::Color::Transparent, true);
             drawText("Ваш результат: " + to_string(previewScore) + " баллов", x + 32, 260, 26, text);
-            drawText("Оставьте контакт, чтобы получить бонус или подборку.", x + 32, 304, 16, muted);
+            drawText("Оставьте контакт для сохранения результата.", x + 32, 304, 16, muted);
 
             leadNameField.rect = makeRect(x, 440, 270, 44);
             leadPhoneField.rect = makeRect(x + 292, 440, 270, 44);
@@ -1495,6 +1965,13 @@ private:
 
         auto question = quizQuestionList[previewIndex];
         drawSurface(makeRect(x, 220, w, 160), 26, card, sf::Color::Transparent, true);
+        string questionMeta = question.type;
+        if (question.timeLimit > 0) {
+            questionMeta += " | лимит: " + to_string(question.timeLimit) + " сек";
+        }
+        if (!question.imagePath.empty()) {
+            questionMeta += " | картинка: " + question.imagePath;
+        }
         drawText(
             "Вопрос " + to_string(previewIndex + 1) + " из " + to_string(quizQuestionList.size()),
             x + 32,
@@ -1502,13 +1979,48 @@ private:
             15,
             muted
         );
-        drawText(question.text, x + 32, 286, 24, text);
+        drawText(questionMeta, x + 32, 274, 14, muted);
+        drawText(question.text, x + 32, 304, 24, text);
 
         float y = 420;
-        for (auto& a : questionAnswers(question.id)) {
-            addButton("answer_" + to_string(a.id), a.text, x, y, 380, 44, violet);
-            y += 62;
+        if (!question.imagePath.empty() && drawImage(question.imagePath, makeRect(x + 560, 244, 250, 118))) {
+            drawText("Изображение", x + 560, 370, 13, muted);
         }
+
+        if (question.type == "текст") {
+            previewTextField.rect = makeRect(x, y, 360, 44);
+            drawInput(previewTextField);
+            addButton("submitTextAnswer", "Ответить", x + 382, y, 130, 44, violet);
+        } else {
+            for (auto& a : questionAnswers(question.id)) {
+                addButton("answer_" + to_string(a.id), a.text, x, y, 430, 44, violet);
+                y += 62;
+            }
+        }
+    }
+
+    bool drawImage(const string& path, sf::FloatRect area) {
+        sf::Texture texture;
+        if (!texture.loadFromFile(path)) {
+            drawSurface(area, 18, cardSoft, line, false);
+            drawCentered("картинка не найдена", area, 14, muted);
+            return false;
+        }
+
+        sf::Sprite sprite(texture);
+        auto size = texture.getSize();
+        if (size.x == 0 || size.y == 0) {
+            return false;
+        }
+
+        float scale = min(area.size.x / (float)size.x, area.size.y / (float)size.y);
+        sprite.setScale({scale, scale});
+        sprite.setPosition({
+            snap(area.position.x + (area.size.x - size.x * scale) / 2.f),
+            snap(area.position.y + (area.size.y - size.y * scale) / 2.f)
+        });
+        window.draw(sprite);
+        return true;
     }
 
     void drawLeads() {
@@ -1544,6 +2056,8 @@ private:
                 14,
                 muted
             );
+            addButton("leadCert_" + to_string(l.id), "Сертификат", x + w - 232, y + 16, 120, 34, violet);
+            addButton("deleteLead_" + to_string(l.id), "Удалить", x + w - 100, y + 16, 88, 34, danger);
 
             y += 78;
             shown++;
@@ -1563,10 +2077,10 @@ private:
 
         drawText("Отчеты", x, 126, 31, text);
         drawText("Выбранный квиз: " + selectedQuizStatus(), x, 168, 16, muted);
-        drawText("Файл отчета сохраняется в data/reports и подходит для печати.", x, 208, 16, muted);
+        drawText("Папка отчета: data/reports.", x, 208, 16, muted);
 
         if (!quizExists(selectedQuizId)) {
-            drawText("Чтобы сформировать отчет, выберите квиз на экране 'Квизы'.", x, 250, 16, muted);
+            drawText("Выберите квиз в разделе 'Квизы'.", x, 250, 16, muted);
         }
 
         addButton("report", "Сформировать отчет", x, 286, 230, 44);
@@ -1577,11 +2091,11 @@ private:
         vector<string> lines = {
             "1. Зарегистрируйтесь или войдите.",
             "2. Создайте квиз: название, категория, тема, бонус.",
-            "3. Добавьте вопросы и варианты ответов с баллами.",
-            "4. Запустите прохождение, чтобы проверить квиз.",
-            "5. После прохождения сохраняется заявка клиента.",
-            "6. В отчетах доступны открытия, заявки и конверсия.",
-            "Аналог: Marquiz — конструктор квизов для заявок и продаж."
+            "3. Добавьте вопросы и ответы.",
+            "4. Запустите прохождение квиза.",
+            "5. После прохождения сохраните заявку.",
+            "6. По заявке можно создать сертификат.",
+            "7. В отчетах отображается статистика."
         };
 
         drawText("Справка", x, 126, 31, text);
@@ -1598,10 +2112,29 @@ private:
             return;
         }
 
+        if (message.empty()) {
+            lastMessage.clear();
+            return;
+        }
+
+        if (message != lastMessage) {
+            lastMessage = message;
+            messageChangedAt = chrono::steady_clock::now();
+        }
+
+        auto now = chrono::steady_clock::now();
+        auto seconds = chrono::duration_cast<chrono::seconds>(now - messageChangedAt).count();
+
+        if (seconds >= 3) {
+            message.clear();
+            lastMessage.clear();
+            return;
+        }
+
         float x = 64.f;
         float w = contentW();
 
-        drawSurface(makeRect(x, footerY(), w, 38), 18, sidebar, sf::Color(38, 52, 78), true);
+        drawSurface(makeRect(x, footerY(), w, 38), 12, sidebar, line, true);
         drawText(message, x + 18, footerY() + 10, 15, muted);
     }
 
@@ -1616,7 +2149,7 @@ private:
         fields.push_back(&f);
 
         sf::Color border = f.active ? accent : line;
-        sf::Color background = f.active ? sf::Color(18, 27, 44) : field;
+        sf::Color background = f.active ? fieldActive : field;
 
         drawSurface(f.rect, 16, background, border, false);
 
@@ -1629,7 +2162,7 @@ private:
             value = f.hint;
         }
 
-        sf::Color color = f.text.empty() ? sf::Color(107, 122, 145) : text;
+        sf::Color color = f.text.empty() ? sf::Color(112, 119, 113) : text;
         drawText(value, f.rect.position.x + 14, f.rect.position.y + 11, 16, color);
     }
 
@@ -1639,7 +2172,7 @@ private:
                    float y,
                    float w,
                    float h,
-                   sf::Color color = sf::Color(38, 203, 180)) {
+                   sf::Color color = sf::Color(165, 128, 82)) {
         Button button{makeRect(x, y, w, h), label, id, color};
         buttons.push_back(button);
 
@@ -1647,10 +2180,10 @@ private:
             return;
         }
 
-        sf::Color buttonColor = hovered(button.rect) ? mix(color, 12) : color;
-        sf::Color labelColor = color == accent ? bg : sf::Color::White;
+        sf::Color buttonColor = hovered(button.rect) ? mix(color, 10) : color;
+        sf::Color labelColor = (color == accent || color == violet) ? bg : sf::Color::White;
 
-        drawSurface(button.rect, 18, buttonColor, sf::Color::Transparent, true);
+        drawSurface(button.rect, 6, buttonColor, sf::Color::Transparent, true);
 
         if (!label.empty()) {
             drawCentered(label, button.rect, 16, labelColor);
@@ -1664,16 +2197,16 @@ private:
                       float w,
                       float h,
                       bool active) {
-        sf::Color buttonColor = active ? violet : sf::Color(24, 34, 52);
+        sf::Color buttonColor = active ? accent : sf::Color(20, 25, 26);
         Button button{makeRect(x, y, w, h), label, id, buttonColor};
         buttons.push_back(button);
 
         if (hovered(button.rect)) {
-            buttonColor = active ? mix(violet, 10) : sf::Color(34, 48, 72);
+            buttonColor = active ? mix(accent, 8) : sf::Color(30, 37, 37);
         }
 
-        drawSurface(button.rect, 18, buttonColor, active ? violet : sf::Color(43, 58, 84), false);
-        drawCentered(label, button.rect, 14, active ? sf::Color::White : text);
+        drawSurface(button.rect, 5, buttonColor, active ? accent : line, false);
+        drawCentered(label, button.rect, 14, active ? bg : text);
     }
 
     void drawSurface(sf::FloatRect r,
@@ -1681,16 +2214,18 @@ private:
                      sf::Color fill,
                      sf::Color border = sf::Color::Transparent,
                      bool shadow = true) {
+        radius = min(radius, 8.f);
+
         if (shadow) {
             drawRoundedRect(
-                makeRect(r.position.x, r.position.y + 7, r.size.x, r.size.y),
+                makeRect(r.position.x, r.position.y + 5, r.size.x, r.size.y),
                 radius,
-                sf::Color(0, 0, 0, 72)
+                sf::Color(0, 0, 0, 70)
             );
             drawRoundedRect(
                 makeRect(r.position.x, r.position.y + 2, r.size.x, r.size.y),
                 radius,
-                sf::Color(0, 0, 0, 34)
+                sf::Color(0, 0, 0, 38)
             );
         }
 
